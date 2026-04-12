@@ -31,8 +31,19 @@ interface UpstreamResponse {
 // In-memory cache: key is the cache filename (normalized query string)
 const memCache = new Map<string, MemCacheEntry>();
 
+interface CacheMeta {
+  fetchedAt: string;
+}
+
+/** Returns the meta-file path for a given data-file key. */
+function metaPath(key: string): string {
+  return path.join(CACHE_DIR, key.replace(/\.txt$/, '.meta.json'));
+}
+
 /**
  * Reads all previously stored cache files from disk into the in-memory map.
+ * Each data file (<key>.txt) must have a companion <key>.meta.json that
+ * records when the data was fetched. Entries without a meta file are skipped.
  * Called once at startup.
  */
 function loadCacheFromDisk(): void {
@@ -40,10 +51,14 @@ function loadCacheFromDisk(): void {
   for (const file of fs.readdirSync(CACHE_DIR)) {
     if (!file.endsWith('.txt')) continue;
     const filePath = path.join(CACHE_DIR, file);
+    const metaFilePath = metaPath(file);
     try {
-      const stat = fs.statSync(filePath);
+      const metaRaw = fs.readFileSync(metaFilePath, 'utf8');
+      const meta: CacheMeta = JSON.parse(metaRaw) as CacheMeta;
+      const fetchedAt = new Date(meta.fetchedAt);
+      if (isNaN(fetchedAt.getTime())) throw new Error('Invalid fetchedAt date');
       const body = fs.readFileSync(filePath, 'utf8');
-      memCache.set(file, { body, mtime: stat.mtime });
+      memCache.set(file, { body, mtime: fetchedAt });
       loaded++;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -64,14 +79,18 @@ function getMemCacheEntry(key: string): CacheEntry | null {
 }
 
 /**
- * Stores a new entry in the in-memory cache and persists it to disk.
+ * Stores a new entry in the in-memory cache and persists both the data file
+ * and its companion meta file to disk.
  */
 function setCacheEntry(key: string, body: string): void {
-  const mtime = new Date();
-  memCache.set(key, { body, mtime });
+  const fetchedAt = new Date();
+  memCache.set(key, { body, mtime: fetchedAt });
   const filePath = path.join(CACHE_DIR, key);
+  const metaFilePath = metaPath(key);
+  const meta: CacheMeta = { fetchedAt: fetchedAt.toISOString() };
   try {
     fs.writeFileSync(filePath, body, 'utf8');
+    fs.writeFileSync(metaFilePath, JSON.stringify(meta), 'utf8');
     console.log(`[cache] STORED ${key}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

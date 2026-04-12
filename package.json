@@ -1,0 +1,28 @@
+{
+  "name": "celestrak-relay",
+  "version": "1.0.0",
+  "description": "Caching relay server for Celestrak GP data",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "lint": "npx prettier . --check & eslint .",
+    "lint-fix": "npx prettier . --write & eslint . --fix"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.0",
+    "eslint": "^10.2.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.5.0",
+    "prettier": "^3.8.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.58.1"
+  }
+}

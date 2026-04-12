@@ -2,9 +2,10 @@ import express, { Request, Response } from 'express';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import config from '../config.json';
 
 const app = express();
-const PORT = 3000;
+const PORT = config.port;
 const CACHE_DIR = path.join(__dirname, '..', 'cache');
 const CELESTRAK_BASE = 'http://www.celestrak.org/NORAD/elements/gp.php';
 
@@ -148,7 +149,7 @@ function fetchFromCelestrak(queryString: string): Promise<UpstreamResponse> {
  *        b. 403 (rate-limit) -> serve stale in-memory copy if available, else 503.
  *        c. Other error      -> 502 with upstream status forwarded.
  */
-app.get('/', async (req: Request, res: Response) => {
+app.get('/celestrak', async (req: Request, res: Response) => {
   const params = req.query as Record<string, string>;
 
   if (!params || Object.keys(params).length === 0) {

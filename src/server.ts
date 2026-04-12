@@ -6,7 +6,7 @@ import config from '../config.json';
 
 const app = express();
 const PORT = config.port;
-const CACHE_DIR = path.join(__dirname, '..', 'cache');
+const CACHE_DIR = path.join(__dirname, '..', 'cache', 'celestrak');
 const CELESTRAK_BASE = 'http://www.celestrak.org/NORAD/elements/gp.php';
 
 // Celestrak updates data every 2 hours; cache TTL matches that

@@ -14,11 +14,13 @@ const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-interface CacheInfo {
-  filePath: string;
-  exists: boolean;
+interface MemCacheEntry {
+  body: string;
+  mtime: Date;
+}
+
+interface CacheEntry extends MemCacheEntry {
   fresh: boolean;
-  mtime: Date | null;
 }
 
 interface UpstreamResponse {
@@ -26,31 +28,68 @@ interface UpstreamResponse {
   body: string;
 }
 
+// In-memory cache: key is the cache filename (normalized query string)
+const memCache = new Map<string, MemCacheEntry>();
+
 /**
- * Converts a query-parameter object into a deterministic, filesystem-safe cache filename.
- * Keys are sorted so that ?A=1&B=2 and ?B=2&A=1 map to the same file.
+ * Reads all previously stored cache files from disk into the in-memory map.
+ * Called once at startup.
  */
-function buildCacheFilename(params: Record<string, string>): string {
+function loadCacheFromDisk(): void {
+  let loaded = 0;
+  for (const file of fs.readdirSync(CACHE_DIR)) {
+    if (!file.endsWith('.txt')) continue;
+    const filePath = path.join(CACHE_DIR, file);
+    try {
+      const stat = fs.statSync(filePath);
+      const body = fs.readFileSync(filePath, 'utf8');
+      memCache.set(file, { body, mtime: stat.mtime });
+      loaded++;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[cache] Could not load ${file}: ${message}`);
+    }
+  }
+  console.log(`[cache] Loaded ${loaded} entries from disk`);
+}
+
+/**
+ * Returns the in-memory cache entry for the given key, or null if absent.
+ */
+function getMemCacheEntry(key: string): CacheEntry | null {
+  const entry = memCache.get(key);
+  if (!entry) return null;
+  const age = Date.now() - entry.mtime.getTime();
+  return { ...entry, fresh: age < CACHE_TTL_MS };
+}
+
+/**
+ * Stores a new entry in the in-memory cache and persists it to disk.
+ */
+function setCacheEntry(key: string, body: string): void {
+  const mtime = new Date();
+  memCache.set(key, { body, mtime });
+  const filePath = path.join(CACHE_DIR, key);
+  try {
+    fs.writeFileSync(filePath, body, 'utf8');
+    console.log(`[cache] STORED ${key}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[cache] Failed to write cache file: ${message}`);
+  }
+}
+
+/**
+ * Converts a query-parameter object into a deterministic, filesystem-safe cache key.
+ * Keys are sorted so that ?A=1&B=2 and ?B=2&A=1 map to the same entry.
+ */
+function buildCacheKey(params: Record<string, string>): string {
   const sorted = Object.keys(params)
     .sort()
     .map((k) => `${k}=${params[k]}`)
     .join('&');
   // Replace characters that are unsafe in filenames
   return sorted.replace(/[^a-zA-Z0-9=&._-]/g, '_') + '.txt';
-}
-
-/**
- * Returns the cache file path and its metadata.
- */
-function getCacheInfo(filename: string): CacheInfo {
-  const filePath = path.join(CACHE_DIR, filename);
-  try {
-    const stat = fs.statSync(filePath);
-    const age = Date.now() - stat.mtimeMs;
-    return { filePath, exists: true, fresh: age < CACHE_TTL_MS, mtime: stat.mtime };
-  } catch {
-    return { filePath, exists: false, fresh: false, mtime: null };
-  }
 }
 
 /**
@@ -84,10 +123,10 @@ function fetchFromCelestrak(queryString: string): Promise<UpstreamResponse> {
  *   ... and any other valid Celestrak GP parameters.
  *
  * Cache behavior:
- *   1. Fresh cache hit -> serve from cache immediately.
+ *   1. Fresh cache hit -> serve from in-memory cache immediately.
  *   2. No cache / stale -> fetch upstream.
- *        a. 200 OK           -> store + serve new data.
- *        b. 403 (rate-limit) -> serve stale cache if available, else 503.
+ *        a. 200 OK           -> update memory + disk, serve new data.
+ *        b. 403 (rate-limit) -> serve stale in-memory copy if available, else 503.
  *        c. Other error      -> 502 with upstream status forwarded.
  */
 app.get('/', async (req: Request, res: Response) => {
@@ -100,14 +139,16 @@ app.get('/', async (req: Request, res: Response) => {
     return;
   }
 
-  const filename = buildCacheFilename(params);
-  const cache = getCacheInfo(filename);
+  const key = buildCacheKey(params);
+  const cached = getMemCacheEntry(key);
 
-  // --- Serve from fresh cache ---
-  if (cache.exists && cache.fresh) {
+  // --- Serve from fresh in-memory cache ---
+  if (cached?.fresh) {
+    console.log(`[cache] Serving cached copy (${key})`);
     res.set('X-Cache', 'HIT');
-    res.set('X-Cache-Date', cache.mtime!.toUTCString());
-    res.sendFile(cache.filePath);
+    res.set('X-Cache-Date', cached.mtime.toUTCString());
+    res.set('Content-Type', 'text/plain; charset=utf-8');
+    res.send(cached.body);
     return;
   }
 
@@ -120,12 +161,13 @@ app.get('/', async (req: Request, res: Response) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[upstream] Network error: ${message}`);
-    if (cache.exists) {
-      console.warn(`[cache] Serving stale copy due to network error (${filename})`);
+    if (cached) {
+      console.warn(`[cache] Serving stale copy due to network error (${key})`);
       res.set('X-Cache', 'STALE');
-      res.set('X-Cache-Date', cache.mtime!.toUTCString());
+      res.set('X-Cache-Date', cached.mtime.toUTCString());
       res.set('X-Cache-Reason', 'upstream-network-error');
-      res.sendFile(cache.filePath);
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.send(cached.body);
       return;
     }
     res.status(502).send(`Upstream request failed: ${message}`);
@@ -134,14 +176,15 @@ app.get('/', async (req: Request, res: Response) => {
 
   // --- Handle 403 rate-limit response ---
   if (upstream.status === 403) {
-    console.warn(`[upstream] 403 received for ${filename}`);
+    console.warn(`[upstream] 403 received for ${key}`);
     console.warn(`[upstream] Body: ${upstream.body.trim()}`);
-    if (cache.exists) {
-      console.log(`[cache] Serving stale copy after 403 (${filename})`);
+    if (cached) {
+      console.log(`[cache] Serving stale copy after 403 (${key})`);
       res.set('X-Cache', 'STALE');
-      res.set('X-Cache-Date', cache.mtime!.toUTCString());
+      res.set('X-Cache-Date', cached.mtime.toUTCString());
       res.set('X-Cache-Reason', 'upstream-rate-limited');
-      res.sendFile(cache.filePath);
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.send(cached.body);
       return;
     }
     res
@@ -155,32 +198,28 @@ app.get('/', async (req: Request, res: Response) => {
 
   // --- Handle non-200 upstream responses ---
   if (upstream.status !== 200) {
-    console.error(`[upstream] Unexpected status ${upstream.status} for ${filename}`);
-    if (cache.exists) {
+    console.error(`[upstream] Unexpected status ${upstream.status} for ${key}`);
+    if (cached) {
       res.set('X-Cache', 'STALE');
-      res.set('X-Cache-Date', cache.mtime!.toUTCString());
+      res.set('X-Cache-Date', cached.mtime.toUTCString());
       res.set('X-Cache-Reason', `upstream-${upstream.status}`);
-      res.sendFile(cache.filePath);
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.send(cached.body);
       return;
     }
     res.status(502).send(`Upstream returned HTTP ${upstream.status}:\n${upstream.body}`);
     return;
   }
 
-  // --- 200 OK: persist to cache and respond ---
-  try {
-    fs.writeFileSync(cache.filePath, upstream.body, 'utf8');
-    console.log(`[cache] STORED ${filename}`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[cache] Failed to write cache file: ${message}`);
-    // Still serve the response even if caching failed
-  }
+  // --- 200 OK: update in-memory cache, persist to disk, and respond ---
+  setCacheEntry(key, upstream.body);
 
   res.set('X-Cache', 'MISS');
   res.set('Content-Type', 'text/plain; charset=utf-8');
   res.send(upstream.body);
 });
+
+loadCacheFromDisk();
 
 app.listen(PORT, () => {
   console.log(`Celestrak relay listening on http://localhost:${PORT}`);

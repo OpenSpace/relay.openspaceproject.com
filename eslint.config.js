@@ -23,7 +23,6 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
       'no-duplicate-imports': 'error',
-      'no-console': 'warn',
       'no-self-compare': 'error',
       'no-unreachable-loop': 'error',
       'no-template-curly-in-string': 'error',

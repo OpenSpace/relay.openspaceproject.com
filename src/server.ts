@@ -9,8 +9,8 @@ const PORT = config.port;
 const CACHE_DIR = path.join(__dirname, '..', 'cache', 'celestrak');
 const CELESTRAK_BASE = 'http://www.celestrak.org/NORAD/elements/gp.php';
 
-// Celestrak updates data every 2 hours; cache TTL matches that
-const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+// Celestrak updates data every 12 hours; cache TTL matches that
+const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });

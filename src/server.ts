@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import http from 'http';
+import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import config from '../config.json';
@@ -7,10 +7,12 @@ import config from '../config.json';
 const app = express();
 const PORT = config.port;
 const CACHE_DIR = path.join(__dirname, '..', 'cache', 'celestrak');
-const CELESTRAK_BASE = 'http://www.celestrak.org/NORAD/elements/gp.php';
+const CELESTRAK_GP_BASE = 'https://celestrak.org/NORAD/elements/gp.php';
+const CELESTRAK_SUP_GP_BASE =
+  'https://celestrak.org/NORAD/elements/supplemental/sup-gp.php';
 
-// Celestrak updates data every 12 hours; cache TTL matches that
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+// Celestrak updates data every 6 hours; cache TTL matches that
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -103,24 +105,27 @@ function setCacheEntry(key: string, body: string): void {
  * Converts a query-parameter object into a deterministic, filesystem-safe cache key.
  * Keys are sorted so that ?A=1&B=2 and ?B=2&A=1 map to the same entry.
  */
-function buildCacheKey(params: Record<string, string>): string {
+function buildCacheKey(endpoint: string, params: Record<string, string>): string {
   const sorted = Object.keys(params)
     .sort()
     .map((k) => `${k}=${params[k]}`)
     .join('&');
-  // Replace characters that are unsafe in filenames
-  return sorted.replace(/[^a-zA-Z0-9=&._-]/g, '_') + '.txt';
+  // Replace characters that are unsafe in filenames; prefix with endpoint type
+  return endpoint + '_' + sorted.replace(/[^a-zA-Z0-9=&._-]/g, '_') + '.txt';
 }
 
 /**
  * Fetches data from Celestrak and returns a Promise that resolves with
  * { status, body } or rejects on network error.
  */
-function fetchFromCelestrak(queryString: string): Promise<UpstreamResponse> {
+function fetchFromCelestrak(
+  base: string,
+  queryString: string
+): Promise<UpstreamResponse> {
   return new Promise((resolve, reject) => {
-    const url = `${CELESTRAK_BASE}?${queryString}`;
+    const url = `${base}?${queryString}`;
 
-    http
+    https
       .get(url, { timeout: 30_000 }, (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -135,7 +140,7 @@ function fetchFromCelestrak(queryString: string): Promise<UpstreamResponse> {
 }
 
 /**
- * Main relay handler.
+ * Factory that creates a relay handler for a given Celestrak endpoint.
  *
  * Accepted query params (passed through verbatim to Celestrak):
  *   GROUP=<name>&FORMAT=<fmt>
@@ -148,96 +153,108 @@ function fetchFromCelestrak(queryString: string): Promise<UpstreamResponse> {
  *        a. 200 OK           -> update memory + disk, serve new data.
  *        b. 403 (rate-limit) -> serve stale in-memory copy if available, else 503.
  *        c. Other error      -> 502 with upstream status forwarded.
+ *
+ * @param base     Full base URL of the Celestrak endpoint (gp or sup-gp).
+ * @param endpoint Short identifier used as a cache-key prefix ('gp' or 'sup-gp').
  */
-app.get('/celestrak', async (req: Request, res: Response) => {
-  const params = req.query as Record<string, string>;
+function makeCelestrakHandler(base: string, endpoint: string) {
+  return async (req: Request, res: Response): Promise<void> => {
+    const params = req.query as Record<string, string>;
 
-  if (!params || Object.keys(params).length === 0) {
-    res
-      .status(400)
-      .send('Missing query parameters. Example: /?GROUP=starlink&FORMAT=kvn');
-    return;
-  }
+    if (!params || Object.keys(params).length === 0) {
+      res
+        .status(400)
+        .send('Missing query parameters. Example: /?GROUP=starlink&FORMAT=kvn');
+      return;
+    }
 
-  const key = buildCacheKey(params);
-  const cached = getMemCacheEntry(key);
+    const key = buildCacheKey(endpoint, params);
+    const cached = getMemCacheEntry(key);
 
-  // --- Serve from fresh in-memory cache ---
-  if (cached?.fresh) {
-    console.log(`[cache] Serving cached copy (${key})`);
-    res.set('X-Cache', 'HIT');
-    res.set('X-Cache-Date', cached.mtime.toUTCString());
+    // --- Serve from fresh in-memory cache ---
+    if (cached?.fresh) {
+      console.log(`[cache] Serving cached copy (${key})`);
+      res.set('X-Cache', 'HIT');
+      res.set('X-Cache-Date', cached.mtime.toUTCString());
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.send(cached.body);
+      return;
+    }
+
+    // --- Fetch from upstream ---
+    const queryString = new URLSearchParams(params).toString();
+    let upstream: UpstreamResponse;
+
+    try {
+      upstream = await fetchFromCelestrak(base, queryString);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[upstream] Network error: ${message}`);
+      if (cached) {
+        console.warn(`[cache] Serving stale copy due to network error (${key})`);
+        res.set('X-Cache', 'STALE');
+        res.set('X-Cache-Date', cached.mtime.toUTCString());
+        res.set('X-Cache-Reason', 'upstream-network-error');
+        res.set('Content-Type', 'text/plain; charset=utf-8');
+        res.send(cached.body);
+        return;
+      }
+      res.status(502).send(`Upstream request failed: ${message}`);
+      return;
+    }
+
+    // --- Handle 403 rate-limit response ---
+    if (upstream.status === 403) {
+      console.warn(`[upstream] 403 received for ${key}`);
+      console.warn(`[upstream] Body: ${upstream.body.trim()}`);
+      if (cached) {
+        console.log(`[cache] Serving stale copy after 403 (${key})`);
+        res.set('X-Cache', 'STALE');
+        res.set('X-Cache-Date', cached.mtime.toUTCString());
+        res.set('X-Cache-Reason', 'upstream-rate-limited');
+        res.set('Content-Type', 'text/plain; charset=utf-8');
+        res.send(cached.body);
+        return;
+      }
+      res
+        .status(503)
+        .send(
+          `Celestrak is rate-limiting this request and no cached copy is available.\n\n` +
+            `Upstream message:\n${upstream.body}`
+        );
+      return;
+    }
+
+    // --- Handle non-200 upstream responses ---
+    if (upstream.status !== 200) {
+      console.error(`[upstream] Unexpected status ${upstream.status} for ${key}`);
+      if (cached) {
+        res.set('X-Cache', 'STALE');
+        res.set('X-Cache-Date', cached.mtime.toUTCString());
+        res.set('X-Cache-Reason', `upstream-${upstream.status}`);
+        res.set('Content-Type', 'text/plain; charset=utf-8');
+        res.send(cached.body);
+        return;
+      }
+      res
+        .status(502)
+        .send(`Upstream returned HTTP ${upstream.status}:\n${upstream.body}`);
+      return;
+    }
+
+    // --- 200 OK: update in-memory cache, persist to disk, and respond ---
+    setCacheEntry(key, upstream.body);
+
+    res.set('X-Cache', 'MISS');
     res.set('Content-Type', 'text/plain; charset=utf-8');
-    res.send(cached.body);
-    return;
-  }
+    res.send(upstream.body);
+  };
+}
 
-  // --- Fetch from upstream ---
-  const queryString = new URLSearchParams(params).toString();
-  let upstream: UpstreamResponse;
-
-  try {
-    upstream = await fetchFromCelestrak(queryString);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[upstream] Network error: ${message}`);
-    if (cached) {
-      console.warn(`[cache] Serving stale copy due to network error (${key})`);
-      res.set('X-Cache', 'STALE');
-      res.set('X-Cache-Date', cached.mtime.toUTCString());
-      res.set('X-Cache-Reason', 'upstream-network-error');
-      res.set('Content-Type', 'text/plain; charset=utf-8');
-      res.send(cached.body);
-      return;
-    }
-    res.status(502).send(`Upstream request failed: ${message}`);
-    return;
-  }
-
-  // --- Handle 403 rate-limit response ---
-  if (upstream.status === 403) {
-    console.warn(`[upstream] 403 received for ${key}`);
-    console.warn(`[upstream] Body: ${upstream.body.trim()}`);
-    if (cached) {
-      console.log(`[cache] Serving stale copy after 403 (${key})`);
-      res.set('X-Cache', 'STALE');
-      res.set('X-Cache-Date', cached.mtime.toUTCString());
-      res.set('X-Cache-Reason', 'upstream-rate-limited');
-      res.set('Content-Type', 'text/plain; charset=utf-8');
-      res.send(cached.body);
-      return;
-    }
-    res
-      .status(503)
-      .send(
-        `Celestrak is rate-limiting this request and no cached copy is available.\n\n` +
-          `Upstream message:\n${upstream.body}`
-      );
-    return;
-  }
-
-  // --- Handle non-200 upstream responses ---
-  if (upstream.status !== 200) {
-    console.error(`[upstream] Unexpected status ${upstream.status} for ${key}`);
-    if (cached) {
-      res.set('X-Cache', 'STALE');
-      res.set('X-Cache-Date', cached.mtime.toUTCString());
-      res.set('X-Cache-Reason', `upstream-${upstream.status}`);
-      res.set('Content-Type', 'text/plain; charset=utf-8');
-      res.send(cached.body);
-      return;
-    }
-    res.status(502).send(`Upstream returned HTTP ${upstream.status}:\n${upstream.body}`);
-    return;
-  }
-
-  // --- 200 OK: update in-memory cache, persist to disk, and respond ---
-  setCacheEntry(key, upstream.body);
-
-  res.set('X-Cache', 'MISS');
-  res.set('Content-Type', 'text/plain; charset=utf-8');
-  res.send(upstream.body);
-});
+// /celestrak        -> gp.php      (general perturbations)
+// /celestrak/sup-gp -> sup-gp.php  (supplemental GP, higher-cadence updates)
+app.get('/celestrak', makeCelestrakHandler(CELESTRAK_GP_BASE, 'gp'));
+app.get('/celestrak/sup-gp', makeCelestrakHandler(CELESTRAK_SUP_GP_BASE, 'sup-gp'));
 
 loadCacheFromDisk();
 

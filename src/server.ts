@@ -38,16 +38,17 @@ interface CacheMeta {
   fetchedAt: string;
 }
 
-/** Returns the meta-file path for a given data-file key. */
+/**
+ * Returns the meta-file path for a given data-file key.
+ */
 function metaPath(key: string): string {
   return path.join(CACHE_DIR, key.replace(/\.txt$/, '.meta.json'));
 }
 
 /**
- * Reads all previously stored cache files from disk into the in-memory map.
- * Each data file (<key>.txt) must have a companion <key>.meta.json that
- * records when the data was fetched. Entries without a meta file are skipped.
- * Called once at startup.
+ * Reads all previously stored cache files from disk into the in-memory map. Each data
+ * file (<key>.txt) must have a companion <key>.meta.json that records when the data was
+ * fetched. Entries without a meta file are skipped. Called once at startup.
  */
 function loadCacheFromDisk(): void {
   let loaded = 0;
@@ -82,8 +83,8 @@ function getMemCacheEntry(key: string): CacheEntry | null {
 }
 
 /**
- * Stores a new entry in the in-memory cache and persists both the data file
- * and its companion meta file to disk.
+ * Stores a new entry in the in-memory cache and persists both the data file and its
+ * companion meta file to disk.
  */
 function setCacheEntry(key: string, body: string): void {
   const fetchedAt = new Date();
@@ -102,8 +103,8 @@ function setCacheEntry(key: string, body: string): void {
 }
 
 /**
- * Converts a query-parameter object into a deterministic, filesystem-safe cache key.
- * Keys are sorted so that ?A=1&B=2 and ?B=2&A=1 map to the same entry.
+ * Converts a query-parameter object into a deterministic, filesystem-safe cache key. Keys
+ * are sorted so that ?A=1&B=2 and ?B=2&A=1 map to the same entry.
  */
 function buildCacheKey(endpoint: string, params: Record<string, string>): string {
   const sorted = Object.keys(params)
@@ -115,8 +116,8 @@ function buildCacheKey(endpoint: string, params: Record<string, string>): string
 }
 
 /**
- * Fetches data from Celestrak and returns a Promise that resolves with
- * { status, body } or rejects on network error.
+ * Fetches data from Celestrak and returns a Promise that resolves with `{ status, body }`
+ * or rejects on network error.
  */
 function fetchFromCelestrak(
   base: string,
@@ -171,8 +172,8 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     const key = buildCacheKey(endpoint, params);
     const cached = getMemCacheEntry(key);
 
-    // --- Serve from fresh in-memory cache ---
-    if (cached?.fresh) {
+    // Serve from fresh in-memory cache
+    if (cached?.fresh || (cached && config['disable-upstream'])) {
       console.log(`[cache] Serving cached copy (${key})`);
       res.set('X-Cache', 'HIT');
       res.set('X-Cache-Date', cached.mtime.toUTCString());
@@ -181,7 +182,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // --- Fetch from upstream ---
+    // Fetch from upstream
     const queryString = new URLSearchParams(params).toString();
     let upstream: UpstreamResponse;
 
@@ -203,7 +204,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // --- Handle 403 rate-limit response ---
+    // Handle 403 rate-limit response
     if (upstream.status === 403) {
       console.warn(`[upstream] 403 received for ${key}`);
       console.warn(`[upstream] Body: ${upstream.body.trim()}`);
@@ -225,7 +226,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // --- Handle non-200 upstream responses ---
+    // Handle non-200 upstream responses
     if (upstream.status !== 200) {
       console.error(`[upstream] Unexpected status ${upstream.status} for ${key}`);
       if (cached) {
@@ -242,7 +243,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // --- 200 OK: update in-memory cache, persist to disk, and respond ---
+    // 200 OK: update in-memory cache, persist to disk, and respond
     setCacheEntry(key, upstream.body);
 
     res.set('X-Cache', 'MISS');
@@ -251,9 +252,13 @@ function makeCelestrakHandler(base: string, endpoint: string) {
   };
 }
 
+//
+// main()
+//
+
 // /celestrak        -> gp.php      (general perturbations)
-// /celestrak/sup-gp -> sup-gp.php  (supplemental GP, higher-cadence updates)
 app.get('/celestrak', makeCelestrakHandler(CELESTRAK_GP_BASE, 'gp'));
+// /celestrak/sup-gp -> sup-gp.php  (supplemental GP, higher-cadence updates)
 app.get('/celestrak/sup-gp', makeCelestrakHandler(CELESTRAK_SUP_GP_BASE, 'sup-gp'));
 
 loadCacheFromDisk();

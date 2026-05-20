@@ -308,8 +308,22 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     // convert locally so that a single cached copy serves both format variants.
     const isOMMRequest = params.FORMAT?.toUpperCase() === 'KVN';
     const fetchParams = isOMMRequest ? { ...params, FORMAT: 'csv' } : params;
-
     const key = buildCacheKey(endpoint, fetchParams);
+    const ommKey = isOMMRequest ? buildCacheKey(endpoint, params) : '';
+
+    // For OMM requests, serve from the OMM cache directly if available
+    if (isOMMRequest) {
+      const cachedOMM = getMemCacheEntry(ommKey);
+      if (cachedOMM?.fresh || (cachedOMM && config['disable-upstream'])) {
+        console.log(`[cache] Serving cached OMM copy (${ommKey})`);
+        res.set('X-Cache', 'HIT');
+        res.set('X-Cache-Date', cachedOMM.mtime.toUTCString());
+        res.set('Content-Type', 'text/plain; charset=utf-8');
+        res.send(cachedOMM.body);
+        return;
+      }
+    }
+
     const cached = getMemCacheEntry(key);
 
     // Serve from fresh in-memory cache
@@ -320,8 +334,12 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       res.set('Content-Type', 'text/plain; charset=utf-8');
       if (isOMMRequest) {
         console.log(`[Convert] CSV -> OMM conversion (${key})`);
+        const ommBody = convertCsvToOMM(cached.body);
+        setCacheEntry(ommKey, ommBody);
+        res.send(ommBody);
+      } else {
+        res.send(cached.body);
       }
-      res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
       return;
     }
 
@@ -402,8 +420,12 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     res.set('Content-Type', 'text/plain; charset=utf-8');
     if (isOMMRequest) {
       console.log(`[Convert] CSV -> OMM conversion (${key})`);
+      const ommBody = convertCsvToOMM(upstream.body);
+      setCacheEntry(ommKey, ommBody);
+      res.send(ommBody);
+    } else {
+      res.send(upstream.body);
     }
-    res.send(isOMMRequest ? convertCsvToOMM(upstream.body) : upstream.body);
   };
 }
 

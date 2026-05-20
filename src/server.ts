@@ -17,6 +17,141 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
+interface SatelliteGP {
+  ObjectName: string;
+  ObjectId: string;
+  Epoch: string;
+  MeanMotion: number;
+  Eccentricity: number;
+  Inclination: number;
+  RaAscNode: number;
+  ArgOfPericenter: number;
+  MeanAnomaly: number;
+  EphemerisType: number;
+  ClassificationType: string;
+  NoradCatalogId: number;
+  ElementSetNumber: number;
+  RevAtEpoch: number;
+  BStar: number;
+  MeanMotionDot: number;
+  MeanMotionDdot: number;
+}
+
+function parseSatelliteGPLine(header: string, line: string): SatelliteGP {
+  const keys = header.trimEnd().split(',');
+  const values = line.split(',');
+
+  const get = (field: string): string => {
+    const index = keys.indexOf(field);
+    if (index === -1) throw new Error(`Missing field: ${field}`);
+    return values[index].trim();
+  };
+
+  const num = (field: string): number => {
+    const raw = get(field);
+    const value = Number(raw);
+    if (isNaN(value)) throw new Error(`Invalid number for field ${field}: ${raw}`);
+    return value;
+  };
+
+  return {
+    ObjectName: get('OBJECT_NAME'),
+    ObjectId: get('OBJECT_ID'),
+    Epoch: get('EPOCH'),
+    MeanMotion: num('MEAN_MOTION'),
+    Eccentricity: num('ECCENTRICITY'),
+    Inclination: num('INCLINATION'),
+    RaAscNode: num('RA_OF_ASC_NODE'),
+    ArgOfPericenter: num('ARG_OF_PERICENTER'),
+    MeanAnomaly: num('MEAN_ANOMALY'),
+    EphemerisType: num('EPHEMERIS_TYPE'),
+    ClassificationType: get('CLASSIFICATION_TYPE'),
+    NoradCatalogId: num('NORAD_CAT_ID'),
+    ElementSetNumber: num('ELEMENT_SET_NO'),
+    RevAtEpoch: num('REV_AT_EPOCH'),
+    BStar: num('BSTAR'),
+    MeanMotionDot: num('MEAN_MOTION_DOT'),
+    MeanMotionDdot: num('MEAN_MOTION_DDOT')
+  };
+}
+
+function epochToDayOfYear(epoch: string): { dayOfYear: number, dayFraction: number} {
+  const date = new Date(epoch);
+  const startOfYear = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const msInDay = 86_400_000;
+  const elapsed = date.getTime() - startOfYear.getTime();
+  const dayOfYear = Math.floor(elapsed / msInDay) + 1;
+  const dayFraction = (elapsed % msInDay) / msInDay;
+  return { dayOfYear, dayFraction };
+}
+
+function csvToSatelliteGP(csv: string): SatelliteGP[] {
+  const lines = csv.split('\n');
+  if (lines.length <= 1) {
+    console.log(`[convert] Error converting csv (${csv})`);
+    return [];
+  }
+
+
+  const header = lines[0];
+  lines.shift();
+
+  let gpData: SatelliteGP[] = [];
+  lines.forEach(element => {
+    if (element.trim() === '') {
+      return;
+    }
+
+    const gp = parseSatelliteGPLine(header, element);
+    gpData.push(gp);
+  });
+
+  return gpData;
+}
+
+function gpToOMM(gp: SatelliteGP): string {
+  return `CCSDS_OMM_VERS = 2.0
+CREATION_DATE  = 
+ORIGINATOR     = 
+
+OBJECT_NAME    = ${gp.ObjectName}
+OBJECT_ID      = ${gp.ObjectId}
+CENTER_NAME    = EARTH
+REF_FRAME      = TEME
+TIME_SYSTEM    = UTC
+MEAN_ELEMENT_THEORY = SGP/SGP4
+
+EPOCH          = ${gp.Epoch}
+MEAN_MOTION    = ${gp.MeanMotion}
+ECCENTRICITY   = ${gp.Eccentricity}
+INCLINATION    = ${gp.Inclination}
+RA_OF_ASC_NODE = ${gp.RaAscNode}
+ARG_OF_PERICENTER = ${gp.ArgOfPericenter}
+MEAN_ANOMALY   = ${gp.MeanAnomaly}
+
+EPHEMERIS_TYPE = ${gp.EphemerisType}
+CLASSIFICATION_TYPE = ${gp.ClassificationType}
+NORAD_CAT_ID   = ${gp.NoradCatalogId}
+ELEMENT_SET_NO = ${gp.ElementSetNumber}
+REV_AT_EPOCH   = ${gp.RevAtEpoch}
+BSTAR          = ${gp.BStar}
+MEAN_MOTION_DOT = ${gp.MeanMotionDot}
+MEAN_MOTION_DDOT = ${gp.MeanMotionDdot}
+`;
+}
+
+function convertCsvToOMM(csv: string): string {
+  const result: string[] = [];
+
+  const satelliteGPs = csvToSatelliteGP(csv);
+  for (let gp of satelliteGPs) {
+    let s = gpToOMM(gp);
+    result.push(s);
+  }
+
+  return result.join('\n');
+}
+
 interface MemCacheEntry {
   body: string;
   mtime: Date;
@@ -169,7 +304,12 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    const key = buildCacheKey(endpoint, params);
+    // When the caller requests TLE format, fetch the CSV version instead and
+    // convert locally so that a single cached copy serves both format variants.
+    const isOMMRequest = params.FORMAT?.toUpperCase() === 'KVN';
+    const fetchParams = isOMMRequest ? { ...params, FORMAT: 'csv' } : params;
+
+    const key = buildCacheKey(endpoint, fetchParams);
     const cached = getMemCacheEntry(key);
 
     // Serve from fresh in-memory cache
@@ -178,12 +318,15 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       res.set('X-Cache', 'HIT');
       res.set('X-Cache-Date', cached.mtime.toUTCString());
       res.set('Content-Type', 'text/plain; charset=utf-8');
-      res.send(cached.body);
+      if (isOMMRequest) {
+        console.log(`[Convert] CSV -> OMM conversion (${key})`);
+      }
+      res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
       return;
     }
 
     // Fetch from upstream
-    const queryString = new URLSearchParams(params).toString();
+    const queryString = new URLSearchParams(fetchParams).toString();
     let upstream: UpstreamResponse;
 
     try {
@@ -197,7 +340,10 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('X-Cache-Date', cached.mtime.toUTCString());
         res.set('X-Cache-Reason', 'upstream-network-error');
         res.set('Content-Type', 'text/plain; charset=utf-8');
-        res.send(cached.body);
+        if (isOMMRequest) {
+          console.log(`[Convert] CSV -> OMM conversion (${key})`);
+        }
+        res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
         return;
       }
       res.status(502).send(`Upstream request failed: ${message}`);
@@ -214,7 +360,10 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('X-Cache-Date', cached.mtime.toUTCString());
         res.set('X-Cache-Reason', 'upstream-rate-limited');
         res.set('Content-Type', 'text/plain; charset=utf-8');
-        res.send(cached.body);
+        if (isOMMRequest) {
+          console.log(`[Convert] CSV -> OMM conversion (${key})`);
+        }
+        res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
         return;
       }
       res
@@ -234,7 +383,10 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('X-Cache-Date', cached.mtime.toUTCString());
         res.set('X-Cache-Reason', `upstream-${upstream.status}`);
         res.set('Content-Type', 'text/plain; charset=utf-8');
-        res.send(cached.body);
+        if (isOMMRequest) {
+          console.log(`[Convert] CSV -> OMM conversion (${key})`);
+        }
+        res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
         return;
       }
       res
@@ -248,7 +400,10 @@ function makeCelestrakHandler(base: string, endpoint: string) {
 
     res.set('X-Cache', 'MISS');
     res.set('Content-Type', 'text/plain; charset=utf-8');
-    res.send(upstream.body);
+    if (isOMMRequest) {
+      console.log(`[Convert] CSV -> OMM conversion (${key})`);
+    }
+    res.send(isOMMRequest ? convertCsvToOMM(upstream.body) : upstream.body);
   };
 }
 

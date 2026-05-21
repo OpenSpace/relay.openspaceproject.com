@@ -37,13 +37,12 @@ interface SatelliteGP {
   MeanMotionDdot: number;
 }
 
-function parseSatelliteGPLine(header: string, line: string): SatelliteGP {
-  const keys = header.trimEnd().split(',');
+function parseSatelliteGPLine(headerIndex: Record<string, number>, line: string): SatelliteGP {
   const values = line.split(',');
 
   const get = (field: string): string => {
-    const index = keys.indexOf(field);
-    if (index === -1) throw new Error(`Missing field: ${field}`);
+    const index = headerIndex[field];
+    if (index === undefined) throw new Error(`Missing field: ${field}`);
     return values[index].trim();
   };
 
@@ -86,7 +85,8 @@ function csvToSatelliteGP(csv: string): SatelliteGP[] {
   }
 
 
-  const header = lines[0];
+  const headerIndex: Record<string, number> = {};
+  lines[0].trimEnd().split(',').forEach((key, i) => { headerIndex[key] = i; });
   lines.shift();
 
   let gpData: SatelliteGP[] = [];
@@ -95,7 +95,7 @@ function csvToSatelliteGP(csv: string): SatelliteGP[] {
       return;
     }
 
-    const gp = parseSatelliteGPLine(header, element);
+    const gp = parseSatelliteGPLine(headerIndex, element);
     gpData.push(gp);
   });
 
@@ -296,7 +296,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     if (!params || Object.keys(params).length === 0) {
       res
         .status(400)
-        .send('Missing query parameters. Example: /?GROUP=starlink&FORMAT=csv');
+        .send('Missing query parameters. Example: /celestrak?GROUP=starlink&FORMAT=csv');
       return;
     }
 

@@ -75,20 +75,13 @@ function parseSatelliteGPLine(header: string, line: string): SatelliteGP {
   };
 }
 
-function epochToDayOfYear(epoch: string): { dayOfYear: number, dayFraction: number} {
-  const date = new Date(epoch);
-  const startOfYear = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
-  const msInDay = 86_400_000;
-  const elapsed = date.getTime() - startOfYear.getTime();
-  const dayOfYear = Math.floor(elapsed / msInDay) + 1;
-  const dayFraction = (elapsed % msInDay) / msInDay;
-  return { dayOfYear, dayFraction };
-}
-
 function csvToSatelliteGP(csv: string): SatelliteGP[] {
   const lines = csv.split('\n');
   if (lines.length <= 1) {
-    console.log(`[convert] Error converting csv (${csv})`);
+    const firstLinePreview = (lines[0] ?? '').slice(0, 200);
+    console.log(
+      `[convert] Error converting csv: size=${csv.length} chars, lines=${lines.length}, firstLinePreview="${firstLinePreview}"`
+    );
     return [];
   }
 
@@ -307,8 +300,8 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // When the caller requests TLE format, fetch the CSV version instead and
-    // convert locally so that a single cached copy serves both format variants.
+    // When the caller requests OMM KVN format, fetch the CSV version instead
+    // and convert locally so that a single cached copy serves both variants.
     const isOMMRequest = params.FORMAT?.toUpperCase() === 'KVN';
     const fetchParams = isOMMRequest ? { ...params, FORMAT: 'csv' } : params;
     const key = buildCacheKey(endpoint, fetchParams);
@@ -337,9 +330,15 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       res.set('Content-Type', 'text/plain; charset=utf-8');
       if (isOMMRequest) {
         console.log(`[Convert] CSV -> OMM conversion (${key})`);
-        const ommBody = convertCsvToOMM(cached.body);
-        setCacheEntry(ommKey, ommBody, cached.mtime);
-        res.send(ommBody);
+        try {
+          const ommBody = convertCsvToOMM(cached.body);
+          setCacheEntry(ommKey, ommBody, cached.mtime);
+          res.send(ommBody);
+        } catch (convErr) {
+          const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
+          console.error(`[convert] OMM conversion failed: ${convMsg}`);
+          res.status(500).send(`OMM conversion failed: ${convMsg}`);
+        }
       } else {
         res.send(cached.body);
       }
@@ -370,8 +369,16 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('Content-Type', 'text/plain; charset=utf-8');
         if (isOMMRequest) {
           console.log(`[Convert] CSV -> OMM conversion (${key})`);
+          try {
+            res.send(convertCsvToOMM(cached.body));
+          } catch (convErr) {
+            const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
+            console.error(`[convert] OMM conversion failed: ${convMsg}`);
+            res.status(500).send(`OMM conversion failed: ${convMsg}`);
+          }
+        } else {
+          res.send(cached.body);
         }
-        res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
         return;
       }
       res.status(502).send(`Upstream request failed: ${message}`);
@@ -390,8 +397,16 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('Content-Type', 'text/plain; charset=utf-8');
         if (isOMMRequest) {
           console.log(`[Convert] CSV -> OMM conversion (${key})`);
+          try {
+            res.send(convertCsvToOMM(cached.body));
+          } catch (convErr) {
+            const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
+            console.error(`[convert] OMM conversion failed: ${convMsg}`);
+            res.status(500).send(`OMM conversion failed: ${convMsg}`);
+          }
+        } else {
+          res.send(cached.body);
         }
-        res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
         return;
       }
       res
@@ -413,8 +428,16 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('Content-Type', 'text/plain; charset=utf-8');
         if (isOMMRequest) {
           console.log(`[Convert] CSV -> OMM conversion (${key})`);
+          try {
+            res.send(convertCsvToOMM(cached.body));
+          } catch (convErr) {
+            const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
+            console.error(`[convert] OMM conversion failed: ${convMsg}`);
+            res.status(500).send(`OMM conversion failed: ${convMsg}`);
+          }
+        } else {
+          res.send(cached.body);
         }
-        res.send(isOMMRequest ? convertCsvToOMM(cached.body) : cached.body);
         return;
       }
       res
@@ -431,9 +454,15 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     res.set('Content-Type', 'text/plain; charset=utf-8');
     if (isOMMRequest) {
       console.log(`[Convert] CSV -> OMM conversion (${key})`);
-      const ommBody = convertCsvToOMM(upstream.body);
-      setCacheEntry(ommKey, ommBody, fetchedAt);
-      res.send(ommBody);
+      try {
+        const ommBody = convertCsvToOMM(upstream.body);
+        setCacheEntry(ommKey, ommBody, fetchedAt);
+        res.send(ommBody);
+      } catch (convErr) {
+        const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
+        console.error(`[convert] OMM conversion failed: ${convMsg}`);
+        res.status(500).send(`OMM conversion failed: ${convMsg}`);
+      }
     } else {
       res.send(upstream.body);
     }

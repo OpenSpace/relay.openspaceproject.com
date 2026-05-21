@@ -37,7 +37,10 @@ interface SatelliteGP {
   MeanMotionDdot: number;
 }
 
-function parseSatelliteGPLine(headerIndex: Record<string, number>, line: string): SatelliteGP {
+function parseSatelliteGPLine(
+  headerIndex: Record<string, number>,
+  line: string
+): SatelliteGP {
   const values = line.split(',');
 
   const get = (field: string): string => {
@@ -84,13 +87,17 @@ function csvToSatelliteGP(csv: string): SatelliteGP[] {
     return [];
   }
 
-
   const headerIndex: Record<string, number> = {};
-  lines[0].trimEnd().split(',').forEach((key, i) => { headerIndex[key] = i; });
+  lines[0]
+    .trimEnd()
+    .split(',')
+    .forEach((key, i) => {
+      headerIndex[key] = i;
+    });
   lines.shift();
 
-  let gpData: SatelliteGP[] = [];
-  lines.forEach(element => {
+  const gpData: SatelliteGP[] = [];
+  lines.forEach((element) => {
     if (element.trim() === '') {
       return;
     }
@@ -137,8 +144,8 @@ function convertCsvToOMM(csv: string): string {
   const result: string[] = [];
 
   const satelliteGPs = csvToSatelliteGP(csv);
-  for (let gp of satelliteGPs) {
-    let s = gpToOMM(gp);
+  for (const gp of satelliteGPs) {
+    const s = gpToOMM(gp);
     result.push(s);
   }
 

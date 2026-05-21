@@ -327,7 +327,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       console.log(`[cache] Serving cached copy (${key})`);
       res.set('Content-Type', 'text/plain; charset=utf-8');
       if (isOMMRequest) {
-        console.log(`[Convert] CSV -> OMM conversion (${key})`);
+        console.log(`[convert] CSV -> OMM conversion (${key})`);
         try {
           const ommBody = convertCsvToOMM(cached.body);
           setCacheEntry(ommKey, ommBody, cached.mtime);
@@ -370,7 +370,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('X-Cache-Reason', 'upstream-network-error');
         res.set('Content-Type', 'text/plain; charset=utf-8');
         if (isOMMRequest) {
-          console.log(`[Convert] CSV -> OMM conversion (${key})`);
+          console.log(`[convert] CSV -> OMM conversion (${key})`);
           try {
             res.send(convertCsvToOMM(cached.body));
           } catch (convErr) {
@@ -398,7 +398,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('X-Cache-Reason', 'upstream-rate-limited');
         res.set('Content-Type', 'text/plain; charset=utf-8');
         if (isOMMRequest) {
-          console.log(`[Convert] CSV -> OMM conversion (${key})`);
+          console.log(`[convert] CSV -> OMM conversion (${key})`);
           try {
             res.send(convertCsvToOMM(cached.body));
           } catch (convErr) {
@@ -429,7 +429,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         res.set('X-Cache-Reason', `upstream-${upstream.status}`);
         res.set('Content-Type', 'text/plain; charset=utf-8');
         if (isOMMRequest) {
-          console.log(`[Convert] CSV -> OMM conversion (${key})`);
+          console.log(`[convert] CSV -> OMM conversion (${key})`);
           try {
             res.send(convertCsvToOMM(cached.body));
           } catch (convErr) {
@@ -455,7 +455,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     res.set('X-Cache', 'MISS');
     res.set('Content-Type', 'text/plain; charset=utf-8');
     if (isOMMRequest) {
-      console.log(`[Convert] CSV -> OMM conversion (${key})`);
+      console.log(`[convert] CSV -> OMM conversion (${key})`);
       try {
         const ommBody = convertCsvToOMM(upstream.body);
         setCacheEntry(ommKey, ommBody, fetchedAt);

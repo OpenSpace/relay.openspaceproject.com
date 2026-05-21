@@ -46,7 +46,11 @@ function parseSatelliteGPLine(
   const get = (field: string): string => {
     const index = headerIndex[field];
     if (index === undefined) throw new Error(`Missing field: ${field}`);
-    return values[index].trim();
+    if (index < 0 || index >= values.length || values[index] === undefined) {
+      throw new Error(`Missing value for field: ${field}`);
+    }
+    const raw = values[index];
+    return raw.trim();
   };
 
   const num = (field: string): number => {

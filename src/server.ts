@@ -225,8 +225,7 @@ function getMemCacheEntry(key: string): CacheEntry | null {
  * Stores a new entry in the in-memory cache and persists both the data file and its
  * companion meta file to disk.
  */
-function setCacheEntry(key: string, body: string): void {
-  const fetchedAt = new Date();
+function setCacheEntry(key: string, body: string, fetchedAt: Date = new Date()): void {
   memCache.set(key, { body, mtime: fetchedAt });
   const filePath = path.join(CACHE_DIR, key);
   const metaFilePath = metaPath(key);
@@ -304,7 +303,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     if (!params || Object.keys(params).length === 0) {
       res
         .status(400)
-        .send('Missing query parameters. Example: /?GROUP=starlink&FORMAT=kvn');
+        .send('Missing query parameters. Example: /?GROUP=starlink&FORMAT=csv');
       return;
     }
 
@@ -339,7 +338,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       if (isOMMRequest) {
         console.log(`[Convert] CSV -> OMM conversion (${key})`);
         const ommBody = convertCsvToOMM(cached.body);
-        setCacheEntry(ommKey, ommBody);
+        setCacheEntry(ommKey, ommBody, cached.mtime);
         res.send(ommBody);
       } else {
         res.send(cached.body);
@@ -425,14 +424,15 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     }
 
     // 200 OK: update in-memory cache, persist to disk, and respond
-    setCacheEntry(key, upstream.body);
+    const fetchedAt = new Date();
+    setCacheEntry(key, upstream.body, fetchedAt);
 
     res.set('X-Cache', 'MISS');
     res.set('Content-Type', 'text/plain; charset=utf-8');
     if (isOMMRequest) {
       console.log(`[Convert] CSV -> OMM conversion (${key})`);
       const ommBody = convertCsvToOMM(upstream.body);
-      setCacheEntry(ommKey, ommBody);
+      setCacheEntry(ommKey, ommBody, fetchedAt);
       res.send(ommBody);
     } else {
       res.send(upstream.body);

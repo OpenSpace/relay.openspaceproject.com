@@ -37,11 +37,51 @@ interface SatelliteGP {
   MeanMotionDdot: number;
 }
 
+/**
+ * Splits a single CSV line into fields following RFC 4180:
+ * - Fields may be enclosed in double-quotes.
+ * - A double-quote inside a quoted field is escaped as "".
+ * - Commas inside quoted fields are treated as field content, not separators.
+ */
+function splitCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let i = 0;
+
+  while (i < line.length) {
+    if (line[i] === '"') {
+      let field = '';
+      i++; // skip opening quote
+      while (i < line.length) {
+        if (line[i] === '"') {
+          if (line[i + 1] === '"') {
+            field += '"';
+            i += 2;
+          } else {
+            i++; // skip closing quote
+            break;
+          }
+        } else {
+          field += line[i++];
+        }
+      }
+      fields.push(field);
+      if (i < line.length && line[i] === ',') i++;
+    } else {
+      const start = i;
+      while (i < line.length && line[i] !== ',') i++;
+      fields.push(line.substring(start, i));
+      if (i < line.length) i++; // skip comma
+    }
+  }
+
+  return fields;
+}
+
 function parseSatelliteGPLine(
   headerIndex: Record<string, number>,
   line: string
 ): SatelliteGP {
-  const values = line.split(',');
+  const values = splitCsvLine(line);
 
   const get = (field: string): string => {
     const index = headerIndex[field];
@@ -92,12 +132,9 @@ function csvToSatelliteGP(csv: string): SatelliteGP[] {
   }
 
   const headerIndex: Record<string, number> = {};
-  lines[0]
-    .trimEnd()
-    .split(',')
-    .forEach((key, i) => {
-      headerIndex[key] = i;
-    });
+  splitCsvLine(lines[0].trimEnd()).forEach((key, i) => {
+    headerIndex[key] = i;
+  });
   lines.shift();
 
   const gpData: SatelliteGP[] = [];
@@ -114,6 +151,9 @@ function csvToSatelliteGP(csv: string): SatelliteGP[] {
 }
 
 function gpToOMM(gp: SatelliteGP): string {
+  // Leaving the CREATION_DATE and ORIGINATOR field empty for compatibility with the
+  // Celestrak result
+
   return `CCSDS_OMM_VERS = 2.0
 CREATION_DATE  = 
 ORIGINATOR     = 

@@ -169,6 +169,10 @@ interface UpstreamResponse {
 // In-memory cache: key is the cache filename (normalized query string)
 const memCache = new Map<string, MemCacheEntry>();
 
+// Tracks upstream fetches that are currently in-progress, keyed by cache key.
+// Concurrent requests for the same key share a single fetch Promise.
+const inFlightRequests = new Map<string, Promise<UpstreamResponse>>();
+
 interface CacheMeta {
   fetchedAt: string;
 }
@@ -343,12 +347,19 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // Fetch from upstream
+    // Fetch from upstream, deduplicating concurrent requests for the same key
     const queryString = new URLSearchParams(fetchParams).toString();
     let upstream: UpstreamResponse;
 
     try {
-      upstream = await fetchFromCelestrak(base, queryString);
+      let fetchPromise = inFlightRequests.get(key);
+      if (!fetchPromise) {
+        fetchPromise = fetchFromCelestrak(base, queryString).finally(() => {
+          inFlightRequests.delete(key);
+        });
+        inFlightRequests.set(key, fetchPromise);
+      }
+      upstream = await fetchPromise;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[upstream] Network error: ${message}`);

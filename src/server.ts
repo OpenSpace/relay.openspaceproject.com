@@ -325,14 +325,14 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     // Serve from fresh in-memory cache
     if (cached?.fresh || (cached && config['disable-upstream'])) {
       console.log(`[cache] Serving cached copy (${key})`);
-      res.set('X-Cache', 'HIT');
-      res.set('X-Cache-Date', cached.mtime.toUTCString());
       res.set('Content-Type', 'text/plain; charset=utf-8');
       if (isOMMRequest) {
         console.log(`[Convert] CSV -> OMM conversion (${key})`);
         try {
           const ommBody = convertCsvToOMM(cached.body);
           setCacheEntry(ommKey, ommBody, cached.mtime);
+          res.set('X-Cache', 'HIT');
+          res.set('X-Cache-Date', cached.mtime.toUTCString());
           res.send(ommBody);
         } catch (convErr) {
           const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
@@ -340,6 +340,8 @@ function makeCelestrakHandler(base: string, endpoint: string) {
           res.status(500).send(`OMM conversion failed: ${convMsg}`);
         }
       } else {
+        res.set('X-Cache', 'HIT');
+        res.set('X-Cache-Date', cached.mtime.toUTCString());
         res.send(cached.body);
       }
       return;

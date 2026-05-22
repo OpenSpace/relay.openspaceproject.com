@@ -360,6 +360,14 @@ function makeCelestrakHandler(base: string, endpoint: string) {
 
     params.FORMAT = params.FORMAT?.toLowerCase();
 
+    const SUPPORTED_FORMATS = ['kvn', 'tle', 'csv'];
+    if (params.FORMAT !== undefined && !SUPPORTED_FORMATS.includes(params.FORMAT)) {
+      res.status(400).send(
+        `Unsupported FORMAT "${params.FORMAT}". Supported formats: ${SUPPORTED_FORMATS.join(', ').toUpperCase()}.`
+      );
+      return;
+    }
+
     // When the caller requests OMM KVN format, fetch the CSV version instead
     // and convert locally so that a single cached copy serves both variants.
     const isOMMRequest = params.FORMAT === 'kvn';

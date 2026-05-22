@@ -351,9 +351,11 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
+    params.FORMAT = params.FORMAT?.toLowerCase();
+
     // When the caller requests OMM KVN format, fetch the CSV version instead
     // and convert locally so that a single cached copy serves both variants.
-    const isOMMRequest = params.FORMAT?.toUpperCase() === 'KVN';
+    const isOMMRequest = params.FORMAT === 'kvn';
     const fetchParams = isOMMRequest ? { ...params, FORMAT: 'csv' } : params;
     const key = buildCacheKey(endpoint, fetchParams);
     const ommKey = isOMMRequest ? buildCacheKey(endpoint, params) : '';

@@ -342,9 +342,16 @@ function fetchFromCelestrak(
  */
 function makeCelestrakHandler(base: string, endpoint: string) {
   return async (req: Request, res: Response): Promise<void> => {
+    // Reject requests where any query parameter appears more than once or is nested
+    for (const [k, v] of Object.entries(req.query)) {
+      if (typeof v !== 'string') {
+        res.status(400).send(`Query parameter "${k}" must appear exactly once.`);
+        return;
+      }
+    }
     const params = req.query as Record<string, string>;
 
-    if (!params || Object.keys(params).length === 0) {
+    if (Object.keys(params).length === 0) {
       res
         .status(400)
         .send('Missing query parameters. Example: /celestrak?GROUP=starlink&FORMAT=csv');

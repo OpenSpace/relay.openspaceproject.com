@@ -4,7 +4,7 @@ import { csvToSatelliteGP } from './csv';
 import { gpToOMM } from './omm';
 import { gpToTLE } from './tle';
 import https from 'https';
-import { Request, Response } from 'express';
+import { Express, Request, Response } from 'express';
 import config from '../../config.json';
 
 const CACHE_DIR = path.join(__dirname, '..', '..', 'cache', 'celestrak');
@@ -116,7 +116,7 @@ function metaPath(key: string): string {
  * file (<key>.txt) must have a companion <key>.meta.json that records when the data was
  * fetched. Entries without a meta file are skipped. Called once at startup.
  */
-export function loadCacheFromDisk(): void {
+function loadCacheFromDisk(): void {
   let loaded = 0;
   for (const file of fs.readdirSync(CACHE_DIR)) {
     if (!file.endsWith('.txt')) continue;
@@ -223,7 +223,7 @@ function fetchFromCelestrak(
  * @param base     Full base URL of the Celestrak endpoint (gp or sup-gp).
  * @param endpoint Short identifier used as a cache-key prefix ('gp' or 'sup-gp').
  */
-export function makeCelestrakHandler(base: string, endpoint: string) {
+function makeCelestrakHandler(base: string, endpoint: string) {
   return async (req: Request, res: Response): Promise<void> => {
     // Reject requests where any query parameter appears more than once or is nested
     for (const [k, v] of Object.entries(req.query)) {
@@ -449,4 +449,19 @@ export function makeCelestrakHandler(base: string, endpoint: string) {
       res.send(upstream.body);
     }
   };
+}
+
+export function initialize() {
+  loadCacheFromDisk();
+}
+
+export function registerHandlers(app: Express) {
+  const CELESTRAK_GP_BASE = 'https://celestrak.org/NORAD/elements/gp.php';
+  const CELESTRAK_SUP_GP_BASE =
+    'https://celestrak.org/NORAD/elements/supplemental/sup-gp.php';
+
+  // /celestrak        -> gp.php      (general perturbations)
+  app.get('/celestrak', makeCelestrakHandler(CELESTRAK_GP_BASE, 'gp'));
+  // /celestrak/sup-gp -> sup-gp.php  (supplemental GP, higher-cadence updates)
+  app.get('/celestrak/sup-gp', makeCelestrakHandler(CELESTRAK_SUP_GP_BASE, 'sup-gp'));
 }

@@ -11,6 +11,7 @@
     "lint-fix": "npx prettier . --write & eslint . --fix"
   },
   "dependencies": {
+    "csv-parse": "^6.2.1",
     "express": "^4.19.2"
   },
   "devDependencies": {

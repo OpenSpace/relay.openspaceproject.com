@@ -320,6 +320,19 @@ function convertCsvToTLE(csv: string): string {
     return result.join('\n') + '\n';
 }
 
+// Map from a requested FORMAT (lowercased) to the CSV->target conversion function.
+// For these formats the relay fetches Celestrak's CSV variant once and converts locally,
+// so a single cached source serves every derived format. The native passthrough format
+// 'csv' deliberately has no entry here.
+const CSV_CONVERTERS: Readonly<Record<string, (csv: string) => string>> = {
+  kvn: convertCsvToOMM,
+  tle: convertCsvToTLE
+};
+
+// All FORMAT values the relay accepts. 'csv' is served verbatim from upstream; every
+// other entry must have a corresponding converter in CSV_CONVERTERS.
+const SUPPORTED_FORMATS: readonly string[] = ['csv', ...Object.keys(CSV_CONVERTERS)];
+
 interface MemCacheEntry {
   body: string;
   mtime: Date;
@@ -511,7 +524,6 @@ function makeCelestrakHandler(base: string, endpoint: string) {
 
     params.FORMAT = params.FORMAT?.toLowerCase();
 
-    const SUPPORTED_FORMATS = ['kvn', 'tle', 'csv'];
     if (params.FORMAT !== undefined && !SUPPORTED_FORMATS.includes(params.FORMAT)) {
       res.status(400).send(
         `Unsupported FORMAT "${params.FORMAT}". Supported formats: ${SUPPORTED_FORMATS.join(', ').toUpperCase()}.`
@@ -519,30 +531,26 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    // When the caller requests a format derived from CSV (OMM KVN or TLE), fetch the
-    // CSV version instead and convert locally so that a single cached copy serves all
-    // variants.
-    const converters: Record<string, (csv: string) => string> = {
-      kvn: convertCsvToOMM,
-      tle: convertCsvToTLE
-    };
-    const conversionFormat =
-      params.FORMAT && params.FORMAT in converters ? params.FORMAT : '';
-    const isConversionRequest = conversionFormat !== '';
-    const convertCsv = isConversionRequest ? converters[conversionFormat] : null;
-    const conversionLabel = conversionFormat.toUpperCase();
+    // Look up a converter for the requested FORMAT. A null result means the request is
+    // either format-less or asks for the passthrough 'csv' format - in both cases we
+    // serve the upstream body verbatim.
+    const convertCsv: ((csv: string) => string) | null =
+      params.FORMAT !== undefined && params.FORMAT !== 'csv'
+        ? (CSV_CONVERTERS[params.FORMAT] ?? null)
+        : null;
+    const isConversionRequest = convertCsv !== null;
+    const conversionLabel = isConversionRequest ? params.FORMAT!.toUpperCase() : '';
 
     const fetchParams = isConversionRequest ? { ...params, FORMAT: 'csv' } : params;
     const key = buildCacheKey(endpoint, fetchParams);
     const convertedKey = isConversionRequest ? buildCacheKey(endpoint, params) : '';
 
     // For conversion requests, serve from the converted cache directly if available
-    if (isConversionRequest) {
-      const cachedConverted = getMemCacheEntry(convertedKey);
-      if (
-        cachedConverted?.fresh ||
-        (cachedConverted && config['disable-upstream'])
-      ) {
+    const cachedConverted = isConversionRequest
+      ? getMemCacheEntry(convertedKey)
+      : null;
+    if (isConversionRequest && cachedConverted) {
+      if (cachedConverted.fresh || config['disable-upstream']) {
         console.log(
           `[cache] Serving cached ${conversionLabel} copy (${convertedKey})`
         );
@@ -561,6 +569,21 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       console.log(`[cache] Serving cached copy (${key})`);
       res.set('Content-Type', 'text/plain; charset=utf-8');
       if (isConversionRequest && convertCsv) {
+        // If a converted copy exists and is at least as new as the CSV source, the
+        // previously persisted result is still valid - serve it without reconverting
+        // or re-writing to disk.
+        if (
+          cachedConverted &&
+          cachedConverted.mtime.getTime() >= cached.mtime.getTime()
+        ) {
+          console.log(
+            `[cache] Reusing stored ${conversionLabel} copy (${convertedKey})`
+          );
+          res.set('X-Cache', 'HIT');
+          res.set('X-Cache-Date', cachedConverted.mtime.toUTCString());
+          res.send(cachedConverted.body);
+          return;
+        }
         console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
         try {
           const convertedBody = await runConversion(convertedKey, cached.body, convertCsv);

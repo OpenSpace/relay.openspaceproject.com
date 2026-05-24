@@ -69,17 +69,13 @@ export function gpToTLE(gp: SatelliteGP): string {
   const startOfYearMs = Date.UTC(year, 0, 1);
   const dateMs = Date.UTC(year, month - 1, dom);
   const dayOfYearInt = Math.round((dateMs - startOfYearMs) / 86_400_000) + 1;
-  const dayFrac = (hour * 3600 + minute * 60 + second) / 86_400;
-  const dayOfYear = dayOfYearInt + dayFrac;
+  const totalSeconds = hour * 3600 + minute * 60 + second;
+  const dayFrac = totalSeconds / 86400;
   const yy = (year % 100).toString().padStart(2, '0');
-  const dayInt = Math.floor(dayOfYear);
-  const dayFracOut = dayOfYear - dayInt;
-  const epochStr = dayInt.toString().padStart(3, ' ') + dayFracOut.toFixed(8).slice(1);
+  const epochStr = dayOfYearInt.toString().padStart(3, ' ') + dayFrac.toFixed(8).slice(1);
 
-  // Eccentricity: 7-digit assumed-decimal field. Truncate (don't round) to match the
-  // conventional TLE generator behaviour, but first round at higher precision to absorb
-  // IEEE-754 noise (e.g. 0.0001523 * 1e7 = 1522.9999999999998)
-  const eccStr = Math.floor(Math.round(gp.Eccentricity * 1e10) / 1000)
+  // Eccentricity: 7-digit assumed-decimal field (leading "0." stripped).
+  const eccStr = Math.round(gp.Eccentricity * 1e7)
     .toString()
     .padStart(7, '0');
 
@@ -91,12 +87,20 @@ export function gpToTLE(gp: SatelliteGP): string {
   const revStr = gp.RevAtEpoch.toString().padStart(5, ' ');
   const elsetStr = gp.ElementSetNumber.toString().padStart(4, ' ');
 
-  // Line 0 is the 24-char object name. If the name is too long, truncate to 22 chars and
-  // append "*)" to flag the truncation, matching Celestrak's convention
-  const name =
-    gp.ObjectName.length > 24
-      ? gp.ObjectName.slice(0, 22) + '*)'
-      : gp.ObjectName.padEnd(24, ' ');
+  // Line 0 is the 24-char object name. If the name is too long, truncate to 24 chars.
+  // Celestrak's convention: if truncation occurs inside a parenthesized section, close
+  // with "*)" (22 chars + "*)"); otherwise truncate to 23 chars and append "*".
+  let name: string;
+  if (gp.ObjectName.length > 24) {
+    const openParen = gp.ObjectName.lastIndexOf('(');
+    if (openParen >= 0 && openParen < 22) {
+      name = gp.ObjectName.slice(0, 22) + '*)';
+    } else {
+      name = gp.ObjectName.slice(0, 23) + '*';
+    }
+  } else {
+    name = gp.ObjectName.padEnd(24, ' ');
+  }
   const line0 = name;
 
   const line1Body =

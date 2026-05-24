@@ -24,7 +24,7 @@ function convertCsvToOMM(csv: string): string {
     result.push(s);
   }
 
-  return result.join('\n');
+  return result.join('\n') + '\n';
 }
 
 function convertCsvToTLE(csv: string): string {

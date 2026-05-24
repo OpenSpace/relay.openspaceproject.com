@@ -7,7 +7,6 @@ celestrak.initialize();
 const app = express();
 celestrak.registerHandlers(app);
 
-const PORT = config.port;
-app.listen(PORT, () => {
-  console.log(`Celestrak relay listening on http://localhost:${PORT}`);
+app.listen(config.port, () => {
+  console.log(`Celestrak relay listening on http://localhost:${config.port}`);
 });

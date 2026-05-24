@@ -341,6 +341,33 @@ const memCache = new Map<string, MemCacheEntry>();
 // Concurrent requests for the same key share a single fetch Promise.
 const inFlightRequests = new Map<string, Promise<UpstreamResponse>>();
 
+// Tracks CSV->KVN/TLE conversions that are currently in-progress, keyed by the
+// converted cache key. Concurrent requests asking for the same converted output share
+// a single conversion Promise so the (potentially expensive) work runs only once.
+const inFlightConversions = new Map<string, Promise<string>>();
+
+/**
+ * Runs the given CSV->target-format conversion, deduplicating concurrent calls that
+ * target the same converted cache key. The conversion is wrapped in a Promise so
+ * multiple awaiters share the single result.
+ */
+function runConversion(
+  convertedKey: string,
+  csv: string,
+  convertCsv: (csv: string) => string
+): Promise<string> {
+  let p = inFlightConversions.get(convertedKey);
+  if (!p) {
+    p = Promise.resolve()
+      .then(() => convertCsv(csv))
+      .finally(() => {
+        inFlightConversions.delete(convertedKey);
+      });
+    inFlightConversions.set(convertedKey, p);
+  }
+  return p;
+}
+
 interface CacheMeta {
   fetchedAt: string;
 }
@@ -536,7 +563,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       if (isConversionRequest && convertCsv) {
         console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
         try {
-          const convertedBody = convertCsv(cached.body);
+          const convertedBody = await runConversion(convertedKey, cached.body, convertCsv);
           setCacheEntry(convertedKey, convertedBody, cached.mtime);
           res.set('X-Cache', 'HIT');
           res.set('X-Cache-Date', cached.mtime.toUTCString());
@@ -579,7 +606,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         if (isConversionRequest && convertCsv) {
           console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
           try {
-            res.send(convertCsv(cached.body));
+            res.send(await runConversion(convertedKey, cached.body, convertCsv));
           } catch (convErr) {
             const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
             console.error(`[convert] ${conversionLabel} conversion failed: ${convMsg}`);
@@ -607,7 +634,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         if (isConversionRequest && convertCsv) {
           console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
           try {
-            res.send(convertCsv(cached.body));
+            res.send(await runConversion(convertedKey, cached.body, convertCsv));
           } catch (convErr) {
             const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
             console.error(`[convert] ${conversionLabel} conversion failed: ${convMsg}`);
@@ -638,7 +665,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
         if (isConversionRequest && convertCsv) {
           console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
           try {
-            res.send(convertCsv(cached.body));
+            res.send(await runConversion(convertedKey, cached.body, convertCsv));
           } catch (convErr) {
             const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
             console.error(`[convert] ${conversionLabel} conversion failed: ${convMsg}`);
@@ -664,7 +691,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     if (isConversionRequest && convertCsv) {
       console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
       try {
-        const convertedBody = convertCsv(upstream.body);
+        const convertedBody = await runConversion(convertedKey, upstream.body, convertCsv);
         setCacheEntry(convertedKey, convertedBody, fetchedAt);
         res.send(convertedBody);
       } catch (convErr) {

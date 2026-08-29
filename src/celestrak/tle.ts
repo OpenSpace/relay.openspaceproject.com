@@ -34,12 +34,30 @@ function checksum(line: string): string {
   return (sum % 10).toString();
 }
 
+// Alpha-5 letters for the leading two digits (10-33); I and O are excluded to avoid
+// confusion with 1 and 0
+const ALPHA5_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+/**
+ * Formats a NORAD catalog number as the 5-character TLE field. Numbers up to 99999 are
+ * zero-padded digits; 100000-339999 use the Alpha-5 scheme (leading letter encodes the
+ * first two digits). Larger numbers cannot be represented in TLE format.
+ */
+export function formatCatalogNumber(id: number): string {
+  if (id <= 99_999) return id.toString().padStart(5, '0');
+  if (id <= 339_999) {
+    const letter = ALPHA5_LETTERS[Math.floor(id / 10_000) - 10];
+    return letter + (id % 10_000).toString().padStart(4, '0');
+  }
+  throw new Error(`NORAD catalog number ${id} cannot be represented in TLE format`);
+}
+
 export function gpToTLE(gp: SatelliteGP): string {
   // Standard TLE format. Column positions are 1-indexed per the canonical spec (e.g.
   // https://celestrak.org/NORAD/documentation/tle-fmt.php). Each data line is exactly 69
   // characters, with the final character being a modulo-10 checksum
 
-  const catNum = gp.NoradCatalogId.toString().padStart(5, '0');
+  const catNum = formatCatalogNumber(gp.NoradCatalogId);
   const classification = (gp.ClassificationType || 'U').charAt(0);
 
   // Convert OMM OBJECT_ID "YYYY-NNNAAA" to TLE international designator "YYNNNAAA".

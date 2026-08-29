@@ -35,6 +35,23 @@ function convertCsvToOMM(csv: string): string {
   return gps.map(gpToOMM).join('\n') + '\n';
 }
 
+/**
+ * Like fetchCelestrak, but resolves to null when Celestrak returns 404. Celestrak has no
+ * TLE product for analyst objects (catalog IDs >= 100000) and responds 404 "No GP data
+ * found" for FORMAT=tle even when CSV/KVN succeed for the same query.
+ */
+async function fetchCelestrakOptional(
+  params: Record<string, string>,
+  base?: string
+): Promise<string | null> {
+  try {
+    return await fetchCelestrak(params, base);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('HTTP 404')) return null;
+    throw err;
+  }
+}
+
 function convertCsvToTLE(csv: string): string {
   const gps = csvToSatelliteGP(csv);
   return gps.map(gpToTLE).join('\n') + '\n';
@@ -154,7 +171,7 @@ const TEST_GROUPS = ['galileo', 'geo', 'last-30-days', 'visual'] as const;
 
 describe.each(TEST_GROUPS)('CSV conversion for GROUP=%s', (group) => {
   let csvData: string;
-  let celestrakTLE: string;
+  let celestrakTLE: string | null;
   let celestrakOMM: string;
 
   // Fetch all three formats from Celestrak before running assertions.
@@ -162,16 +179,20 @@ describe.each(TEST_GROUPS)('CSV conversion for GROUP=%s', (group) => {
   it('fetches data from Celestrak', async () => {
     [csvData, celestrakTLE, celestrakOMM] = await Promise.all([
       fetchCelestrak({ GROUP: group, FORMAT: 'csv' }),
-      fetchCelestrak({ GROUP: group, FORMAT: 'tle' }),
+      fetchCelestrakOptional({ GROUP: group, FORMAT: 'tle' }),
       fetchCelestrak({ GROUP: group, FORMAT: 'kvn' })
     ]);
 
     expect(csvData.length).toBeGreaterThan(0);
-    expect(celestrakTLE.length).toBeGreaterThan(0);
     expect(celestrakOMM.length).toBeGreaterThan(0);
   }, 60_000);
 
-  it('CSV -> TLE matches Celestrak TLE output', () => {
+  it('CSV -> TLE matches Celestrak TLE output', (ctx) => {
+    if (celestrakTLE === null) {
+      // Celestrak has no TLE product for this group (analyst objects); nothing to compare
+      ctx.skip();
+      return;
+    }
     const localTLE = convertCsvToTLE(csvData);
     expect(localTLE).toMatchWithFloatTolerance(normalizeLineEndings(celestrakTLE));
   });

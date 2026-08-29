@@ -6,6 +6,7 @@ import { gpToTLE } from './tle';
 import https from 'https';
 import { Express, Request, Response } from 'express';
 import config from '../../config.json';
+import { notifySlack } from '../slack';
 
 const CACHE_DIR = path.join(__dirname, '..', '..', 'cache', 'celestrak');
 
@@ -32,8 +33,14 @@ function convertCsvToTLE(csv: string): string {
 
   const satelliteGPs = csvToSatelliteGP(csv);
   for (const gp of satelliteGPs) {
-    const s = gpToTLE(gp);
-    result.push(s);
+    try {
+      const s = gpToTLE(gp);
+      result.push(s);
+    } catch (err) {
+      // Objects with catalog numbers beyond the TLE-representable range are skipped
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[convert] Skipping ${gp.ObjectName} (${gp.NoradCatalogId}): ${message}`);
+    }
   }
 
   return result.join('\n') + '\n';
@@ -77,6 +84,44 @@ const inFlightRequests = new Map<string, Promise<UpstreamResponse>>();
 // converted cache key. Concurrent requests asking for the same converted output share
 // a single conversion Promise so the (potentially expensive) work runs only once.
 const inFlightConversions = new Map<string, Promise<string>>();
+
+// After an upstream failure, no new upstream request is made for the same key until the
+// cooldown expires; stale cache (or 503) is served instead. This prevents hammering
+// Celestrak with repeated failing requests, which extends their rate-limit blocks.
+const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+const RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+
+// Per-key upstream failure timestamps: no upstream contact for a key until `until`
+const upstreamFailures = new Map<string, { until: number }>();
+
+function recordUpstreamFailure(key: string, cooldownMs: number): void {
+  upstreamFailures.set(key, { until: Date.now() + cooldownMs });
+}
+
+// Global cap on simultaneous upstream connections to Celestrak, across all cache keys
+const MAX_CONCURRENT_UPSTREAM = 2;
+let activeUpstream = 0;
+const upstreamQueue: (() => void)[] = [];
+
+function acquireUpstreamSlot(): Promise<void> {
+  return new Promise((resolve) => {
+    if (activeUpstream < MAX_CONCURRENT_UPSTREAM) {
+      activeUpstream++;
+      resolve();
+    } else {
+      upstreamQueue.push(() => {
+        activeUpstream++;
+        resolve();
+      });
+    }
+  });
+}
+
+function releaseUpstreamSlot(): void {
+  activeUpstream--;
+  const next = upstreamQueue.shift();
+  if (next) next();
+}
 
 /**
  * Runs the given CSV->target-format conversion, deduplicating concurrent calls that
@@ -191,17 +236,20 @@ function fetchFromCelestrak(
   return new Promise((resolve, reject) => {
     const url = `${base}?${queryString}`;
 
-    https
-      .get(url, { timeout: 30_000 }, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('end', () => {
-          const body = Buffer.concat(chunks).toString('utf8');
-          resolve({ status: res.statusCode ?? 0, body });
-        });
-      })
-      .on('error', reject)
-      .on('timeout', () => reject(new Error('Upstream request timed out')));
+    const request = https.get(url, { timeout: 30_000 }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        resolve({ status: res.statusCode ?? 0, body });
+      });
+    });
+    request.on('error', reject);
+    // destroy() aborts the request and closes the socket; the passed error is
+    // delivered to the 'error' handler above, which rejects the promise
+    request.on('timeout', () =>
+      request.destroy(new Error('Upstream request timed out'))
+    );
   });
 }
 
@@ -241,7 +289,11 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
-    params.FORMAT = params.FORMAT?.toLowerCase();
+    // Only normalize when present: assigning `undefined` would add a FORMAT key that
+    // URLSearchParams later stringifies to the literal "FORMAT=undefined" upstream
+    if (params.FORMAT !== undefined) {
+      params.FORMAT = params.FORMAT.toLowerCase();
+    }
 
     if (params.FORMAT !== undefined && !SUPPORTED_FORMATS.includes(params.FORMAT)) {
       res
@@ -323,6 +375,41 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       return;
     }
 
+    // If this key recently failed upstream, don't contact Celestrak again until the
+    // cooldown expires; serve stale data or 503 instead
+    const failure = upstreamFailures.get(key);
+    if (failure && Date.now() < failure.until) {
+      const retryAfterSec = Math.ceil((failure.until - Date.now()) / 1000);
+      console.warn(`[upstream] Cooldown active for ${retryAfterSec}s (${key})`);
+      if (cached) {
+        res.set('X-Cache', 'STALE');
+        res.set('X-Cache-Date', cached.mtime.toUTCString());
+        res.set('X-Cache-Reason', 'upstream-cooldown');
+        res.set('Content-Type', 'text/plain; charset=utf-8');
+        if (isConversionRequest && convertCsv) {
+          console.log(`[convert] CSV -> ${conversionLabel} conversion (${key})`);
+          try {
+            res.send(await runConversion(convertedKey, cached.body, convertCsv));
+          } catch (convErr) {
+            const convMsg = convErr instanceof Error ? convErr.message : String(convErr);
+            console.error(`[convert] ${conversionLabel} conversion failed: ${convMsg}`);
+            res.status(500).send(`${conversionLabel} conversion failed: ${convMsg}`);
+          }
+        } else {
+          res.send(cached.body);
+        }
+        return;
+      }
+      res.set('Retry-After', String(retryAfterSec));
+      res
+        .status(503)
+        .send(
+          'A recent upstream request for this data failed and no cached copy is ' +
+            `available. Retry after ${retryAfterSec} seconds.`
+        );
+      return;
+    }
+
     // Fetch from upstream, deduplicating concurrent requests for the same key
     const queryString = new URLSearchParams(fetchParams).toString();
     let upstream: UpstreamResponse;
@@ -330,15 +417,22 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     try {
       let fetchPromise = inFlightRequests.get(key);
       if (!fetchPromise) {
-        fetchPromise = fetchFromCelestrak(base, queryString).finally(() => {
-          inFlightRequests.delete(key);
-        });
+        fetchPromise = acquireUpstreamSlot()
+          .then(() => fetchFromCelestrak(base, queryString).finally(releaseUpstreamSlot))
+          .finally(() => {
+            inFlightRequests.delete(key);
+          });
         inFlightRequests.set(key, fetchPromise);
       }
       upstream = await fetchPromise;
     } catch (err) {
+      recordUpstreamFailure(key, FAILURE_COOLDOWN_MS);
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[upstream] Network error: ${message}`);
+      notifySlack(
+        `network:${key}`,
+        `:warning: Celestrak network error for \`${key}\`: ${message}`
+      );
       if (cached) {
         console.warn(`[cache] Serving stale copy due to network error (${key})`);
         res.set('X-Cache', 'STALE');
@@ -365,8 +459,13 @@ function makeCelestrakHandler(base: string, endpoint: string) {
 
     // Handle 403 rate-limit response
     if (upstream.status === 403) {
+      recordUpstreamFailure(key, RATE_LIMIT_COOLDOWN_MS);
       console.warn(`[upstream] 403 received for ${key}`);
       console.warn(`[upstream] Body: ${upstream.body.trim()}`);
+      notifySlack(
+        `403:${key}`,
+        `:no_entry: Celestrak rate-limited (403) request \`${key}\`:\n${upstream.body.trim()}`
+      );
       if (cached) {
         console.log(`[cache] Serving stale copy after 403 (${key})`);
         res.set('X-Cache', 'STALE');
@@ -398,7 +497,12 @@ function makeCelestrakHandler(base: string, endpoint: string) {
 
     // Handle non-200 upstream responses
     if (upstream.status !== 200) {
+      recordUpstreamFailure(key, FAILURE_COOLDOWN_MS);
       console.error(`[upstream] Unexpected status ${upstream.status} for ${key}`);
+      notifySlack(
+        `status-${upstream.status}:${key}`,
+        `:warning: Celestrak returned HTTP ${upstream.status} for \`${key}\`:\n${upstream.body.trim()}`
+      );
       if (cached) {
         res.set('X-Cache', 'STALE');
         res.set('X-Cache-Date', cached.mtime.toUTCString());
@@ -425,6 +529,7 @@ function makeCelestrakHandler(base: string, endpoint: string) {
     }
 
     // 200 OK: update in-memory cache, persist to disk, and respond
+    upstreamFailures.delete(key);
     const fetchedAt = new Date();
     setCacheEntry(key, upstream.body, fetchedAt);
 

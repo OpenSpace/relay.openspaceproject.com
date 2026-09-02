@@ -6,7 +6,7 @@ import { gpToTLE } from './tle';
 import https from 'https';
 import { Express, Request, Response } from 'express';
 import config from '../../config.json';
-import { notifySlack } from '../slack';
+import { notifySlack, SlackContext } from '../slack';
 
 const CACHE_DIR = path.join(__dirname, '..', '..', 'cache', 'celestrak');
 
@@ -39,7 +39,9 @@ function convertCsvToTLE(csv: string): string {
     } catch (err) {
       // Objects with catalog numbers beyond the TLE-representable range are skipped
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[convert] Skipping ${gp.ObjectName} (${gp.NoradCatalogId}): ${message}`);
+      console.warn(
+        `[convert] Skipping ${gp.ObjectName} (${gp.NoradCatalogId}): ${message}`
+      );
     }
   }
 
@@ -247,10 +249,21 @@ function fetchFromCelestrak(
     request.on('error', reject);
     // destroy() aborts the request and closes the socket; the passed error is
     // delivered to the 'error' handler above, which rejects the promise
-    request.on('timeout', () =>
-      request.destroy(new Error('Upstream request timed out'))
-    );
+    request.on('timeout', () => request.destroy(new Error('Upstream request timed out')));
   });
+}
+
+/**
+ * Collects the details of the incoming client request that are useful when diagnosing an
+ * error reported to Slack.
+ */
+function describeRequest(req: Request): SlackContext {
+  return {
+    'Request URL': `${req.protocol}://${req.get('host') ?? 'unknown-host'}${req.originalUrl}`,
+    'Client IP': req.ip,
+    'User agent': req.get('user-agent'),
+    Referer: req.get('referer')
+  };
 }
 
 /**
@@ -431,7 +444,14 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       console.error(`[upstream] Network error: ${message}`);
       notifySlack(
         `network:${key}`,
-        `:warning: Celestrak network error for \`${key}\`: ${message}`
+        `:warning: Celestrak network error for \`${key}\`: ${message}`,
+        {
+          ...describeRequest(req),
+          'Upstream URL': `${base}?${queryString}`,
+          'Cached copy': cached
+            ? `stale copy from ${cached.mtime.toUTCString()} served`
+            : 'none available (502 returned)'
+        }
       );
       if (cached) {
         console.warn(`[cache] Serving stale copy due to network error (${key})`);
@@ -464,7 +484,14 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       console.warn(`[upstream] Body: ${upstream.body.trim()}`);
       notifySlack(
         `403:${key}`,
-        `:no_entry: Celestrak rate-limited (403) request \`${key}\`:\n${upstream.body.trim()}`
+        `:no_entry: Celestrak rate-limited (403) request \`${key}\`:\n${upstream.body.trim()}`,
+        {
+          ...describeRequest(req),
+          'Upstream URL': `${base}?${queryString}`,
+          'Cached copy': cached
+            ? `stale copy from ${cached.mtime.toUTCString()} served`
+            : 'none available (503 returned)'
+        }
       );
       if (cached) {
         console.log(`[cache] Serving stale copy after 403 (${key})`);
@@ -501,7 +528,14 @@ function makeCelestrakHandler(base: string, endpoint: string) {
       console.error(`[upstream] Unexpected status ${upstream.status} for ${key}`);
       notifySlack(
         `status-${upstream.status}:${key}`,
-        `:warning: Celestrak returned HTTP ${upstream.status} for \`${key}\`:\n${upstream.body.trim()}`
+        `:warning: Celestrak returned HTTP ${upstream.status} for \`${key}\`:\n${upstream.body.trim()}`,
+        {
+          ...describeRequest(req),
+          'Upstream URL': `${base}?${queryString}`,
+          'Cached copy': cached
+            ? `stale copy from ${cached.mtime.toUTCString()} served`
+            : 'none available (502 returned)'
+        }
       );
       if (cached) {
         res.set('X-Cache', 'STALE');
